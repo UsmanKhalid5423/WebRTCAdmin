@@ -1,0 +1,373 @@
+﻿@{
+    ViewData["Title"] = "Admin - Answer Call";
+}
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>@ViewData["Title"]</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f3f3f3;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            min-height: 100vh;
+            flex-direction: row;
+        }
+
+        #sidebar {
+            width: 250px;
+            background-color: #fff;
+            padding: 20px;
+            box-shadow: 2px 0 5px rgba(0, 0, 0, 0.1);
+            height: 100vh;
+            overflow-y: auto;
+        }
+
+            #sidebar h3 {
+                text-align: center;
+                margin-bottom: 20px;
+                font-size: 18px;
+            }
+
+        #activeUsers ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        #activeUsers li {
+            margin: 10px;
+            padding: 15px;
+            background-color: #f0f0f0;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+
+            #activeUsers li:hover {
+                background-color: #d4e0f9;
+            }
+
+        #mainContent {
+            flex: 1;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+            flex-direction: column;
+        }
+
+        #callPopup {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: #fff;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.2);
+            max-width: 400px;
+            width: 100%;
+            text-align: center;
+            z-index: 1000;
+        }
+
+            #callPopup h3 {
+                margin-bottom: 20px;
+                font-size: 18px;
+                font-weight: bold;
+                color: #333;
+            }
+
+            #callPopup .call-buttons {
+                display: flex;
+                justify-content: space-around;
+            }
+
+            #callPopup button {
+                padding: 10px 20px;
+                font-size: 16px;
+                background-color: #4CAF50;
+                color: #fff;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+            }
+
+                #callPopup button.reject {
+                    background-color: #f44336;
+                }
+
+        #overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: none;
+            z-index: 999;
+        }
+
+        video {
+            max-width: 100%;
+            max-height: 80vh;
+            border-radius: 8px;
+            border: 2px solid #ddd;
+        }
+
+        #callDuration {
+            margin-top: 15px;
+            font-size: 18px;
+            color: #388e3c;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div id="sidebar">
+        <h3>Active Users</h3>
+        <div id="activeUsers">
+            <ul id="userList"></ul>
+        </div>
+    </div>
+
+    <div id="mainContent">
+        <video id="localVideo" autoplay muted style="display:none;"></video>
+        <video id="remoteVideo" autoplay style="display:none;"></video>
+
+        <div id="callPopup">
+            <h3>Incoming Call</h3>
+            <p><span id="callerId"></span> is calling...</p>
+            <div class="call-buttons">
+                <button id="acceptCallBtn">Accept</button>
+                <button id="rejectCallBtn" class="reject">Reject</button>
+            </div>
+        </div>
+
+        <div id="callDuration" style="display:none;"></div><br />
+
+        <button id="endCallBtn" style="display:none; background-color:#f44336; color:white; padding:10px 20px; border:none; border-radius:5px; cursor:pointer; font-size:16px;">
+            End Call
+        </button>
+
+        <div id="overlay"></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/7.0.5/signalr.min.js"></script>
+    <script>
+        const localVideo = document.getElementById("localVideo");
+        const remoteVideo = document.getElementById("remoteVideo");
+        const incomingCallPopup = document.getElementById("callPopup");
+        const callerIdSpan = document.getElementById("callerId");
+        const acceptCallBtn = document.getElementById("acceptCallBtn");
+        const rejectCallBtn = document.getElementById("rejectCallBtn");
+        const overlay = document.getElementById("overlay");
+        const userList = document.getElementById("userList");
+        const endCallBtn = document.getElementById("endCallBtn");
+        const callDuration = document.getElementById("callDuration");
+
+        let callTimerInterval;
+        let callTime = 0;
+        let localStream, peerConnection;
+        let pendingOffer = null;
+        let pendingCallerId = null;
+        let ringingAudio;
+
+        const connection = new signalR.HubConnectionBuilder()
+            .withUrl("https://localhost:7035/callhub?role=admin")
+            .build();
+
+        const iceServers = {
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+        };
+
+        async function initLocalMedia() {
+            localStream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
+            localVideo.srcObject = localStream;
+        }
+
+        async function createPeerConnection() {
+            peerConnection = new RTCPeerConnection(iceServers);
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    connection.invoke("SendIceCandidate", pendingCallerId, event.candidate);
+                }
+            };
+
+            peerConnection.ontrack = (event) => {
+                remoteVideo.srcObject = event.streams[0];
+            };
+
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+        }
+
+                connection.on("ReceiveOffer", (fromUserId, offer) => {
+            pendingOffer = offer;
+            pendingCallerId = fromUserId;
+            callerIdSpan.textContent = `User ${fromUserId}`;
+            incomingCallPopup.style.display = "block";
+            overlay.style.display = "block";
+
+            // Play the ringing sound for incoming call
+            ringingAudio = new Audio("ringing.mp3");
+            ringingAudio.loop = true;  // Loop the ringing sound
+            ringingAudio.play().catch(err => {
+                console.error("Failed to play ringing audio:", err);
+            });
+        });
+
+             acceptCallBtn.onclick = async () => {
+            // Stop the ringing audio on answer
+            if (ringingAudio) {
+                ringingAudio.pause();
+                ringingAudio.currentTime = 0;
+            }
+
+            incomingCallPopup.style.display = "none";
+            overlay.style.display = "none";
+
+            // Initialize local media
+            await initLocalMedia();
+            await createPeerConnection();
+
+            // Set remote description (offer)
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(pendingOffer));
+
+            // Create and send answer
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+            await connection.invoke("AnswerCall", pendingCallerId, answer);
+
+            // Reset offer and update UI
+            pendingOffer = null;
+            endCallBtn.style.display = "inline-block";
+            acceptCallBtn.style.display = "none";
+            rejectCallBtn.style.display = "none";
+            startCallTimer(pendingCallerId);
+        };
+
+        rejectCallBtn.onclick = async () => {
+            if (ringingAudio) {
+                ringingAudio.pause();
+                ringingAudio.currentTime = 0;
+            }
+            incomingCallPopup.style.display = "none";
+            overlay.style.display = "none";
+            await connection.invoke("DeclineCall", pendingCallerId);
+            pendingOffer = null;
+            pendingCallerId = null;
+        };
+
+            endCallBtn.onclick = async () => {
+            await connection.invoke("EndCall", pendingCallerId);
+            showCallEndedAndReset();
+        };
+
+        connection.on("CallEnded", () => {
+            showCallEndedAndReset(true);
+        });
+
+        connection.on("ActiveUsersUpdated", (activeUsers) => {
+            userList.innerHTML = '';
+            activeUsers.forEach(userId => {
+                const li = document.createElement("li");
+                li.textContent = `User ${userId}`;
+                li.onclick = () => {
+                    connection.invoke("CallUser", userId, {});
+                };
+                userList.appendChild(li);
+            });
+        });
+
+        connection.on("CallDeclined", (adminConnectionId) => {
+            if (ringingAudio) {
+                ringingAudio.pause();
+                ringingAudio.currentTime = 0;
+            }
+
+            console.log(`Call has been declined by Admin ${adminConnectionId}`);
+            incomingCallPopup.style.display = "none";
+            overlay.style.display = "none";
+        });
+
+              // Handle incoming ICE candidates for peer connection
+        connection.on("ReceiveCandidate", async (fromUserId, candidate) => {
+            const iceCandidate = new RTCIceCandidate(candidate);
+            await peerConnection.addIceCandidate(iceCandidate);
+        });
+
+        connection.on("StopRinging", () => {
+            if (ringingAudio) {
+                ringingAudio.pause();
+                ringingAudio.currentTime = 0;
+            }
+
+            incomingCallPopup.style.display = "none";
+            overlay.style.display = "none";
+        });
+
+        connection.on("CallAnswered", (callerConnectionId) => {
+            if (ringingAudio) {
+                ringingAudio.pause();
+                ringingAudio.currentTime = 0;
+            }
+        });
+
+        function startCallTimer(clientId) {
+            callTime = 0;
+            callDuration.style.display = "block";
+            callDuration.textContent = `On call with User ${clientId} - Duration: 0:00`;
+            callTimerInterval = setInterval(() => {
+                callTime++;
+                const minutes = Math.floor(callTime / 60);
+                const seconds = callTime % 60;
+                callDuration.textContent = `On call with User ${clientId} - Duration: ${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
+            }, 1000);
+        }
+
+        function stopCallTimer() {
+            clearInterval(callTimerInterval);
+        }
+        function showCallEndedAndReset(fromClient = false) {
+            stopCallTimer();
+            const minutes = Math.floor(callTime / 60);
+            const seconds = callTime % 60;
+            const durationText = `Call ended. Duration: ${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
+            callDuration.style.display = "block";
+            callDuration.textContent = durationText;
+
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+
+            endCallBtn.style.display = "none";
+            acceptCallBtn.style.display = "inline-block";
+            rejectCallBtn.style.display = "inline-block";
+
+            setTimeout(() => {
+                callDuration.textContent = "";
+                callDuration.style.display = "none";
+                overlay.style.display = "none";
+                callerIdSpan.textContent = "";
+            }, 3000);
+        }
+
+        connection.start().then(() => {
+            console.log("Admin Connected:", connection.connectionId);
+        });
+    </script>
+</body>
+</html>
